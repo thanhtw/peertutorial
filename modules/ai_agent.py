@@ -6,11 +6,18 @@ This module interacts with Ollama to generate code reviews and feedback.
 import json
 import requests
 import os
-from typing import Dict, List, Any, Optional, Tuple
+import tempfile
+from typing import Dict, List, Any, Optional, Tuple, Union
+from pathlib import Path
+import time
+import backoff
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Ollama API configuration
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-# Updated default model to llama3:1b as per requirement
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3:1b")
 
 
@@ -28,9 +35,74 @@ def is_ollama_running() -> bool:
         return False
 
 
+def start_ollama() -> bool:
+    """
+    Attempt to start the Ollama service.
+    
+    Returns:
+        bool: True if successfully started, False otherwise
+    """
+    import platform
+    import subprocess
+    
+    try:
+        system = platform.system()
+        
+        if system == "Windows":
+            # For Windows, try running the Ollama executable
+            subprocess.Popen(
+                ["ollama", "serve"],
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+        elif system == "Linux":
+            # Try systemd service first
+            try:
+                subprocess.run(
+                    ["systemctl", "--user", "start", "ollama"],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=5
+                )
+            except (subprocess.SubprocessError, FileNotFoundError):
+                # Fallback to direct start
+                subprocess.Popen(
+                    ["ollama", "serve"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+        elif system == "Darwin":  # macOS
+            subprocess.Popen(
+                ["ollama", "serve"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+        else:
+            print(f"Unsupported platform: {system}")
+            return False
+            
+        # Wait for Ollama to start
+        for i in range(10):
+            time.sleep(1)
+            if is_ollama_running():
+                print("Ollama started successfully!")
+                return True
+                
+        print("Ollama did not start within expected time")
+        return False
+        
+    except Exception as e:
+        print(f"Error starting Ollama: {str(e)}")
+        return False
+
+
+@backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_tries=3)
 def call_ollama(prompt: str, system_prompt: Optional[str] = None) -> str:
     """
-    Call the Ollama API with the given prompt.
+    Call the Ollama API with the given prompt, with retry capability.
     
     Args:
         prompt: The prompt to send to the model
@@ -41,15 +113,18 @@ def call_ollama(prompt: str, system_prompt: Optional[str] = None) -> str:
     """
     # First check if Ollama is running
     if not is_ollama_running():
-        error_msg = (
-            "Ollama is not running or not accessible. Please:\n"
-            "1. Ensure Ollama is installed\n"
-            "2. Start Ollama using 'ollama serve' in a terminal\n"
-            "3. Verify the connection URL is correct (currently: {OLLAMA_URL})\n"
-            "4. Refresh this page and try again"
-        )
-        print(error_msg)
-        return error_msg
+        if start_ollama():
+            print("Ollama started successfully")
+        else:
+            error_msg = (
+                "Ollama is not running or not accessible. Please:\n"
+                "1. Ensure Ollama is installed\n"
+                "2. Start Ollama using 'ollama serve' in a terminal\n"
+                "3. Verify the connection URL is correct (currently: {OLLAMA_URL})\n"
+                "4. Refresh this page and try again"
+            )
+            print(error_msg)
+            return error_msg
     
     # Check if the model exists
     try:
@@ -59,11 +134,30 @@ def call_ollama(prompt: str, system_prompt: Optional[str] = None) -> str:
             model_exists = any(model["name"] == OLLAMA_MODEL for model in models)
             if not model_exists:
                 pull_msg = (
-                    f"Model '{OLLAMA_MODEL}' is not available. You need to pull it first.\n"
-                    f"Run 'ollama pull {OLLAMA_MODEL}' in a terminal, then refresh this page."
+                    f"Model '{OLLAMA_MODEL}' is not available. Attempting to pull it...\n"
                 )
                 print(pull_msg)
-                return pull_msg
+                
+                # Try to pull the model
+                pull_response = requests.post(
+                    f"{OLLAMA_URL}/api/pull",
+                    json={"name": OLLAMA_MODEL}
+                )
+                
+                if pull_response.status_code != 200:
+                    return f"Failed to pull model '{OLLAMA_MODEL}'. Please pull it manually with 'ollama pull {OLLAMA_MODEL}'."
+                
+                # Wait for model to be pulled (up to 30 seconds)
+                for i in range(30):
+                    time.sleep(1)
+                    check = requests.get(f"{OLLAMA_URL}/api/tags")
+                    if check.status_code == 200:
+                        models = check.json().get("models", [])
+                        if any(model["name"] == OLLAMA_MODEL for model in models):
+                            print(f"Model '{OLLAMA_MODEL}' successfully pulled!")
+                            break
+                else:
+                    return f"Timeout waiting for model '{OLLAMA_MODEL}' to be pulled. Please try again later."
     except Exception as e:
         print(f"Error checking available models: {e}")
     
@@ -105,10 +199,11 @@ def get_code_review_knowledge() -> str:
     You are an expert in software engineering and code review. 
     Provide comprehensive knowledge about effective peer code reviews including best practices, 
     common pitfalls, and how to give constructive feedback.
+    Focus specifically on Java code reviews, covering style conventions, common pitfalls, and design patterns.
     Format your response in Markdown.
     """
     
-    prompt = "Provide a comprehensive guide on how to conduct effective peer code reviews for students learning programming."
+    prompt = "Provide a comprehensive guide on how to conduct effective peer code reviews for students learning Java programming."
     
     return call_ollama(prompt, system_prompt)
 
@@ -130,6 +225,7 @@ def generate_code_snippet() -> str:
     4. Poor design choices
     
     The code should be compilable but have room for improvement.
+    Make sure the class name matches the filename that would be required in Java.
     """
     
     prompt = "Generate a Java code snippet with intentional issues for a peer code review exercise. The code should be a complete class, between 30-50 lines long."
@@ -154,10 +250,11 @@ def get_ai_review(
         A formatted review string
     """
     system_prompt = """
-    You are an expert code reviewer providing feedback on a Java code snippet.
+    You are an expert Java code reviewer providing feedback on a code snippet.
     Consider compilation results, style issues, and your programming expertise to provide a comprehensive review.
+    Focus on Java best practices, object-oriented design principles, and coding standards.
     Format your review in Markdown, highlighting both strengths and weaknesses of the code.
-    Provide specific suggestions for improvements.
+    Provide specific suggestions for improvements with examples where appropriate.
     """
     
     # Create a prompt that includes the code and analysis results
@@ -183,6 +280,11 @@ def get_ai_review(
     3. Design and architecture
     4. Performance considerations
     5. Specific recommendations for improvement
+    
+    For each issue you identify, please explain:
+    - What the issue is
+    - Why it's a problem 
+    - How to fix it with a code example
     """
     
     return call_ollama(prompt, system_prompt)
@@ -203,6 +305,7 @@ def compare_reviews(ai_review: str, student_review: str) -> Dict[str, Any]:
     You are an experienced programming instructor evaluating a student's code review skills.
     Compare the student's review with the AI-generated review to provide constructive feedback.
     Focus on what the student did well and what they missed or could improve.
+    Be encouraging but thorough in your assessment.
     """
     
     prompt = f"""
@@ -244,10 +347,10 @@ def compare_reviews(ai_review: str, student_review: str) -> Dict[str, Any]:
         else:
             # Fallback if proper JSON is not found
             return {
-                "feedback": "The AI was unable to generate a structured analysis. Please try again.",
+                "feedback": response,
                 "strengths": [],
-                "improvements": [],
-                "missed_issues": []
+                "improvements": ["Try to structure your review more clearly"],
+                "missed_issues": ["Unable to analyze specific missed issues"]
             }
     except json.JSONDecodeError:
         # Handle the case where response is not valid JSON
@@ -258,3 +361,155 @@ def compare_reviews(ai_review: str, student_review: str) -> Dict[str, Any]:
             "improvements": ["Try to be more specific in your feedback"],
             "missed_issues": ["Unable to analyze missed issues"]
         }
+
+
+def set_ollama_model(model_name: str) -> bool:
+    """
+    Set the Ollama model to use for code reviews.
+    
+    Args:
+        model_name: Name of the model to use
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    global OLLAMA_MODEL
+    
+    # Check if model exists
+    try:
+        model_check = requests.get(f"{OLLAMA_URL}/api/tags")
+        if model_check.status_code == 200:
+            models = model_check.json().get("models", [])
+            model_exists = any(model["name"] == model_name for model in models)
+            
+            if model_exists:
+                OLLAMA_MODEL = model_name
+                return True
+            else:
+                # Try to pull the model
+                print(f"Model '{model_name}' not found. Attempting to pull...")
+                pull_response = requests.post(
+                    f"{OLLAMA_URL}/api/pull",
+                    json={"name": model_name}
+                )
+                
+                if pull_response.status_code != 200:
+                    print(f"Failed to pull model '{model_name}'")
+                    return False
+                
+                # Wait for model to be pulled (up to 30 seconds)
+                for i in range(30):
+                    time.sleep(1)
+                    check = requests.get(f"{OLLAMA_URL}/api/tags")
+                    if check.status_code == 200:
+                        models = check.json().get("models", [])
+                        if any(model["name"] == model_name for model in models):
+                            OLLAMA_MODEL = model_name
+                            return True
+                
+                return False
+    except Exception as e:
+        print(f"Error setting Ollama model: {e}")
+        return False
+
+
+def get_available_models() -> List[Dict[str, Any]]:
+    """
+    Get a list of available Ollama models.
+    
+    Returns:
+        List of model information dictionaries
+    """
+    # Default models that can be pulled
+    default_models = [
+        {"id": "llama3:1b", "name": "Llama 3 (1B)", "description": "Meta's Llama 3 1B model", "pulled": False, "recommended": True},
+        {"id": "llama3:8b", "name": "Llama 3 (8B)", "description": "Meta's Llama 3 8B model", "pulled": False, "recommended": True},
+        {"id": "deepseek-coder:6.7b", "name": "DeepSeek Coder (6.7B)", "description": "Code-specialized model", "pulled": False, "recommended": True},
+        {"id": "phi3:mini", "name": "Phi-3 Mini", "description": "Microsoft Phi-3 model", "pulled": False, "recommended": True},
+        {"id": "gemma:2b", "name": "Gemma 2B", "description": "Google's lightweight Gemma model", "pulled": False, "recommended": True}
+    ]
+    
+    # Check if Ollama is running
+    if not is_ollama_running():
+        return default_models
+    
+    try:
+        # Get list of already pulled models
+        response = requests.get(f"{OLLAMA_URL}/api/tags")
+        if response.status_code == 200:
+            pulled_models = response.json().get("models", [])
+            pulled_ids = [model["name"] for model in pulled_models]
+            
+            # Mark models as pulled if they exist
+            for model in default_models:
+                if model["id"] in pulled_ids:
+                    model["pulled"] = True
+            
+            # Add any pulled models that aren't in our default list
+            for pulled_model in pulled_models:
+                model_id = pulled_model["name"]
+                if not any(model["id"] == model_id for model in default_models):
+                    # Extract size information
+                    size_str = pulled_model.get("size", "Unknown")
+                    # Add to the list
+                    default_models.append({
+                        "id": model_id,
+                        "name": model_id,
+                        "description": f"Size: {size_str}",
+                        "pulled": True,
+                        "recommended": False
+                    })
+        
+        return default_models
+    except Exception as e:
+        print(f"Error getting Ollama models: {str(e)}")
+        return default_models
+
+
+def pull_model(model_name: str) -> bool:
+    """
+    Pull an Ollama model.
+    
+    Args:
+        model_name: Name of the model to pull
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if not is_ollama_running():
+        if not start_ollama():
+            return False
+    
+    try:
+        print(f"Pulling model {model_name}...")
+        response = requests.post(
+            f"{OLLAMA_URL}/api/pull",
+            json={"name": model_name}
+        )
+        
+        if response.status_code != 200:
+            print(f"Failed to start model download: {response.text}")
+            return False
+        
+        # Wait for model to be pulled (checking periodically)
+        max_wait_time = 300  # 5 minute timeout
+        start_time = time.time()
+        
+        while (time.time() - start_time) < max_wait_time:
+            # Check if model exists in list of models
+            check_response = requests.get(f"{OLLAMA_URL}/api/tags")
+            if check_response.status_code == 200:
+                models = check_response.json().get("models", [])
+                if any(model["name"] == model_name for model in models):
+                    print(f"Model {model_name} pulled successfully!")
+                    return True
+            
+            # Wait before checking again
+            time.sleep(5)
+            
+        print(f"Timeout pulling model {model_name}")
+        return False
+        
+    except Exception as e:
+        print(f"Error pulling model: {str(e)}")
+        return False

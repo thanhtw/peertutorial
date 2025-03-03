@@ -1,6 +1,6 @@
 """
 Main application module for Peer Code Review Tutorial System.
-This app provides an interactive environment for learning code review practices.
+Updated to include a dedicated Ollama LLM setup section.
 """
 
 import streamlit as st
@@ -12,32 +12,23 @@ import tempfile
 import json
 import time
 from pathlib import Path
-import requests
+import re
 from modules.ai_agent import (
     get_code_review_knowledge,
     generate_code_snippet,
     get_ai_review,
     compare_reviews,
+    is_ollama_running,
+    start_ollama,
+    get_available_models,
+    set_ollama_model,
+    pull_model,
     OLLAMA_MODEL,
-    OLLAMA_URL,
-    is_ollama_running
+    OLLAMA_URL
 )
-from modules.compiler import compile_java
-from modules.checkstyle import run_checkstyle
-
-# Try to import the model utilities
-try:
-    from utils.ollama_model_check import (
-        check_ollama_server,
-        get_pulled_models,
-        initialize_best_model,
-        check_and_pull_model,
-        get_model_details,
-        find_suitable_model
-    )
-    HAVE_MODEL_UTILS = True
-except ImportError:
-    HAVE_MODEL_UTILS = False
+from modules.compiler import compile_java, ensure_java_installed, get_java_version, extract_class_name
+from modules.checkstyle import run_checkstyle, check_checkstyle_available
+from ollama_setup import _render_llm_setup_section
 
 # Set page configuration
 st.set_page_config(
@@ -54,7 +45,10 @@ def ensure_directories():
     # Create models directory if it doesn't exist
     models_dir = os.getenv("MODELS_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "models"))
     os.makedirs(models_dir, exist_ok=True)
-    os.makedirs(os.path.join(models_dir, "ollama"), exist_ok=True)
+    
+    # Create data directory if it doesn't exist
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    os.makedirs(data_dir, exist_ok=True)
     
     # Create .env file if it doesn't exist
     env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -95,274 +89,105 @@ def initialize_session_state():
         st.session_state.model_initialized = False
     if "initialization_message" not in st.session_state:
         st.session_state.initialization_message = ""
-    if "model_details" not in st.session_state:
-        st.session_state.model_details = {}
+    if "system_ready" not in st.session_state:
+        st.session_state.system_ready = False
+    # Add model parameters 
+    if "model_params" not in st.session_state:
+        st.session_state.model_params = {
+            "temperature": 0.7,
+            "max_tokens": 1024
+        }
 
-# Check and initialize Ollama models at startup
-def initialize_ollama_models():
+# Verify system requirements
+def check_system_requirements():
     """
-    Check for available Ollama models and initialize the best one.
+    Check if system meets requirements to run the application.
     
     Returns:
-        bool: True if a model was initialized, False otherwise
+        tuple: (ready, details) where ready is a boolean and details is a dict
     """
-    # Set up the initialization message placeholder
-    init_message = st.empty()
-    init_message.info("Initializing Ollama models...")
+    details = {
+        "java_installed": False,
+        "java_version": None,
+        "ollama_running": False,
+        "checkstyle_available": False,
+        "messages": []
+    }
     
-    # Check if Ollama server is running
-    if not is_ollama_running():
-        init_message.warning("⚠️ Ollama server is not running. Start it to use models.")
-        return False
+    # Check Java installation
+    java_installed = ensure_java_installed()
+    details["java_installed"] = java_installed
+    details["java_version"] = get_java_version()
     
-    # Check if we have the model utilities
-    if HAVE_MODEL_UTILS:
-        # Use the model utilities for better initialization
-        selected_model, all_models = find_suitable_model()
-        
-        if selected_model:
-            # Store models in session state
-            model_names = [model["name"] for model in all_models]
-            st.session_state.available_models = all_models
-            
-            # Get model details
-            model_details = get_model_details(selected_model)
-            st.session_state.model_details = model_details
-            
-            # Set the selected model
-            st.session_state.selected_model = selected_model
-            st.session_state.model_initialized = True
-            
-            # Update initialization message
-            size_info = next((m.get("size", "") for m in all_models if m["name"] == selected_model), "")
-            init_message.success(f"✅ Initialized model: {selected_model} ({size_info})")
-            
-            st.session_state.initialization_message = (
-                f"Using {selected_model} ({size_info}) out of {len(all_models)} available models."
-            )
-            
-            return True
-        else:
-            # No models found, try to pull the default model
-            init_message.warning(f"No models found. Attempting to pull {OLLAMA_MODEL}...")
-            if check_and_pull_model(OLLAMA_MODEL):
-                init_message.info(f"Started pulling {OLLAMA_MODEL}. Please wait for the download to complete.")
-                st.session_state.initialization_message = (
-                    f"Please wait while {OLLAMA_MODEL} is being pulled. "
-                    "Refresh the page when download is complete."
-                )
-            else:
-                init_message.error(f"Failed to pull {OLLAMA_MODEL}. Please pull a model manually.")
-                st.session_state.initialization_message = (
-                    "Failed to pull model. Please pull a model manually using "
-                    f"`ollama pull {OLLAMA_MODEL}` in a terminal."
-                )
-            return False
+    if not java_installed:
+        details["messages"].append("Java is not installed. Please install Java to compile and analyze Java code.")
+    
+    # Check Ollama
+    ollama_running = is_ollama_running()
+    details["ollama_running"] = ollama_running
+    
+    if not ollama_running:
+        details["messages"].append(f"Ollama is not running at {OLLAMA_URL}. The application will attempt to start it.")
+    
+    # Check Checkstyle
+    checkstyle_available, checkstyle_message = check_checkstyle_available()
+    details["checkstyle_available"] = checkstyle_available
+    
+    if not checkstyle_available:
+        details["messages"].append(f"Checkstyle is not available: {checkstyle_message}")
+    
+    # System is ready if Java is installed
+    # (We can still function without Ollama running as we'll try to start it)
+    # (We will download Checkstyle if it's missing)
+    ready = java_installed
+    
+    return ready, details
+
+# Display system status
+def display_system_status():
+    """Display system status in the sidebar."""
+    # Check requirements
+    ready, details = check_system_requirements()
+    
+    st.sidebar.header("System Status")
+    
+    # Java status
+    if details["java_installed"]:
+        st.sidebar.success(f"✅ Java is installed: {details['java_version']}")
     else:
-        # Fallback to basic initialization 
-        try:
-            response = requests.get(f"{OLLAMA_URL}/api/tags")
-            if response.status_code == 200:
-                models = response.json().get("models", [])
-                
-                if models:
-                    # Store models in session state
-                    st.session_state.available_models = models
-                    model_names = [model["name"] for model in models]
-                    
-                    # Select a model
-                    if OLLAMA_MODEL in model_names:
-                        selected_model = OLLAMA_MODEL
-                    else:
-                        selected_model = model_names[0]
-                    
-                    # Set the selected model
-                    st.session_state.selected_model = selected_model
-                    st.session_state.model_initialized = True
-                    
-                    # Update initialization message
-                    init_message.success(f"✅ Initialized model: {selected_model}")
-                    st.session_state.initialization_message = (
-                        f"Using {selected_model} out of {len(models)} available models."
-                    )
-                    
-                    return True
-                else:
-                    # No models found
-                    init_message.warning(f"No models found. Please pull {OLLAMA_MODEL} manually.")
-                    st.session_state.initialization_message = (
-                        f"No models found. Please pull {OLLAMA_MODEL} manually."
-                    )
-                    return False
+        st.sidebar.error("❌ Java is not installed")
+        st.sidebar.info("Please install Java Development Kit (JDK) to use this application.")
+    
+    # Ollama status
+    if details["ollama_running"]:
+        st.sidebar.success(f"✅ Ollama is running at {OLLAMA_URL}")
+    else:
+        st.sidebar.warning(f"⚠️ Ollama is not running at {OLLAMA_URL}")
+        if st.sidebar.button("Start Ollama"):
+            status_placeholder = st.sidebar.empty()
+            status_placeholder.info("Starting Ollama...")
+            if start_ollama():
+                status_placeholder.success("✅ Ollama started successfully!")
+                details["ollama_running"] = True
+                st.rerun()
             else:
-                init_message.error("Failed to get models from Ollama.")
-                return False
-        except Exception as e:
-            init_message.error(f"Error initializing models: {str(e)}")
-            return False
-
-# Display selected model information
-def display_model_info():
-    """Display information about the selected model."""
-    selected_model = st.session_state.get("selected_model", OLLAMA_MODEL)
+                status_placeholder.error("❌ Failed to start Ollama")
+                st.sidebar.info("Please start Ollama manually with 'ollama serve'")
     
-    # Create a section for model information
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Model Information")
+    # Checkstyle status
+    if details["checkstyle_available"]:
+        st.sidebar.success("✅ Checkstyle is available")
+    else:
+        st.sidebar.warning("⚠️ Checkstyle will be downloaded when needed")
     
-    # Show selected model
-    st.sidebar.success(f"✅ Using model: **{selected_model}**")
-    
-    # If we have model details, show them
-    model_details = st.session_state.get("model_details", {})
-    if model_details:
-        with st.sidebar.expander("Model Details"):
-            # Show model parameters
-            if "parameters" in model_details:
-                st.write(f"Parameters: {model_details['parameters']}")
-            
-            # Show model family
-            if "family" in model_details:
-                st.write(f"Family: {model_details['family']}")
-                
-            # Show model description
-            if "description" in model_details:
-                st.write(f"Description: {model_details['description']}")
-                
-            # Show license
-            if "license" in model_details:
-                st.write(f"License: {model_details['license']}")
-    
-    # Show initialization message if any
-    init_message = st.session_state.get("initialization_message", "")
-    if init_message:
-        st.sidebar.info(init_message)
-
-# Render the model selector widget with all pulled models
-def render_model_selector():
-    """Render a dropdown to select from available models."""
-    # Get available models
-    available_models = st.session_state.get("available_models", [])
-    
-    if not available_models:
-        st.sidebar.warning("No models available. Please pull some models first.")
-        return
-    
-    # Create a dictionary for the selectbox
-    model_options = {}
-    for model in available_models:
-        # Format model description with size if available
-        model_name = model["name"]
-        model_size = model.get("size", "")
-        if model_size:
-            display_name = f"{model_name} ({model_size})"
-        else:
-            display_name = model_name
-        model_options[display_name] = model_name
-    
-    # Default selection - try to find our current selected model
-    selected_model = st.session_state.get("selected_model", OLLAMA_MODEL)
-    default_index = 0
-    model_displays = list(model_options.keys())
-    
-    for i, display_name in enumerate(model_displays):
-        if model_options[display_name] == selected_model:
-            default_index = i
-            break
-    
-    # Create the selectbox
-    selected_display = st.sidebar.selectbox(
-        "Select Model:",
-        options=model_displays,
-        index=default_index,
-        key="model_selectbox"
-    )
-    
-    # Update the selected model if changed
-    new_selected_model = model_options[selected_display]
-    if new_selected_model != st.session_state.selected_model:
-        st.session_state.selected_model = new_selected_model
-        
-        # Try to get model details if we have model utilities
-        if HAVE_MODEL_UTILS:
-            st.session_state.model_details = get_model_details(new_selected_model)
-        
-        # Rerun to update UI with new model
-        st.rerun()
-
-# Add model upload section
-def render_model_upload():
-    """Render a section to upload/pull additional models."""
-    # Create a section for adding more models
-    with st.sidebar.expander("Add More Models"):
-        st.write("### Pull Additional Models")
-        
-        # List of recommended models to pull
-        recommended_models = {
-            "llama3:1b": "Llama 3 (1B) - Fastest",
-            "llama3:8b": "Llama 3 (8B) - Good balance",
-            "deepseek-coder:6.7b": "DeepSeek Coder - Best for code",
-            "phi3:mini": "Phi-3 Mini - Small & efficient",
-            "gemma:2b": "Gemma 2B - Compact"
-        }
-        
-        # Get already pulled models
-        available_models = st.session_state.get("available_models", [])
-        pulled_model_names = [model["name"] for model in available_models]
-        
-        # Filter out already pulled models
-        available_to_pull = {k: v for k, v in recommended_models.items() 
-                            if k not in pulled_model_names}
-        
-        if available_to_pull:
-            new_model = st.selectbox(
-                "Select model to pull:", 
-                options=list(available_to_pull.keys()),
-                format_func=lambda x: available_to_pull[x],
-                key="new_model_pulldown"
-            )
-            
-            if st.button("Pull Selected Model", key="pull_model_button"):
-                with st.spinner(f"Pulling {new_model}..."):
-                    # Pull the model
-                    if HAVE_MODEL_UTILS:
-                        success = check_and_pull_model(new_model)
-                    else:
-                        # Direct API call
-                        try:
-                            response = requests.post(
-                                f"{OLLAMA_URL}/api/pull",
-                                json={"name": new_model}
-                            )
-                            success = response.status_code == 200
-                        except Exception:
-                            success = False
-                    
-                    if success:
-                        st.success(f"Started pulling {new_model}!")
-                        st.info("Please refresh the page when download completes.")
-                    else:
-                        st.error(f"Failed to pull {new_model}")
-        else:
-            st.info("All recommended models already pulled!")
-            
-        # Custom model pull
-        st.write("### Pull Custom Model")
-        custom_model = st.text_input("Model name:", placeholder="e.g., mistral:7b")
-        if custom_model and st.button("Pull Custom Model", key="pull_custom_button"):
-            with st.spinner(f"Pulling {custom_model}..."):
-                try:
-                    response = requests.post(
-                        f"{OLLAMA_URL}/api/pull",
-                        json={"name": custom_model}
-                    )
-                    if response.status_code == 200:
-                        st.success(f"Started pulling {custom_model}!")
-                        st.info("Please refresh the page when complete.")
-                    else:
-                        st.error(f"Failed to pull {custom_model}")
-                except Exception as e:
-                    st.error(f"Error pulling model: {str(e)}")
+    # Overall status
+    if ready:
+        st.session_state.system_ready = True
+        return True
+    else:
+        st.session_state.system_ready = False
+        st.warning("⚠️ System is not fully ready. Please address the issues above.")
+        return False
 
 # Main function
 def main():
@@ -378,88 +203,39 @@ def main():
     # Initialize session state
     initialize_session_state()
     
-    # Check and initialize Ollama models
-    if not st.session_state.model_initialized:
-        initialize_ollama_models()
-    
     # Page header
     st.title("🧠 Peer Code Review Tutorial System")
     
     # Sidebar content
     st.sidebar.title("Peer Code Review")
     
-    # Display model information
-    display_model_info()
+    # Check and display system status
+    system_ready = display_system_status()
     
-    # Render model selector if we have models
-    if st.session_state.available_models:
-        render_model_selector()
-        
-        # Render model upload section
-        render_model_upload()
+    # If system is not ready, don't proceed further
+    if not system_ready and not st.session_state.system_ready:
+        st.info("Please address the system requirements above to continue.")
+        return
+    
+    # Organize sections with proper numbering for main content
+    section_num = 1
+    
+    # LLM Model Setup Section
+    _render_llm_setup_section(section_num)
+    section_num += 1
     
     # Handle different steps of the tutorial
-    if st.session_state.step == 1:
+    if not st.session_state.model_initialized:
+        st.warning("Please initialize an Ollama model before continuing.")
+    elif st.session_state.step == 1:
         # Step 1: Introduction and knowledge about peer code review
-        render_introduction_step()
+        render_introduction_step(section_num)
     elif st.session_state.step == 2:
         # Step 2: Code snippet review
-        render_code_review_step()
+        render_code_review_step(section_num)
     elif st.session_state.step == 3:
         # Step 3: Comparison and feedback
-        render_comparison_step()
-
-# Render the introduction step
-def render_introduction_step():
-    """Render the introduction and knowledge about peer code review."""
-    st.header("Welcome to the Peer Code Review Tutorial")
-    
-    # Load knowledge about peer code review if not already loaded
-    if not st.session_state.knowledge:
-        with st.spinner("Loading code review knowledge..."):
-            if is_ollama_running() and st.session_state.model_initialized:
-                knowledge = get_code_review_knowledge()
-                st.session_state.knowledge = knowledge
-            else:
-                st.session_state.knowledge = """
-                ## Peer Code Review
-                
-                Peer code review is a software quality assurance practice where developers review each other's code
-                to identify bugs, improve code quality, and ensure adherence to standards.
-                
-                ### Key Benefits:
-                - Identifies bugs and issues early
-                - Ensures code quality and consistency
-                - Facilitates knowledge sharing
-                - Improves overall software quality
-                
-                ### Best Practices:
-                1. Be constructive, not critical
-                2. Focus on code, not the coder
-                3. Review code in small chunks
-                4. Provide specific, actionable feedback
-                5. Use a checklist for consistency
-                
-                Please wait for Ollama initialization to get more detailed information.
-                """
-    
-    st.markdown(st.session_state.knowledge)
-    
-    st.subheader("How this tutorial works:")
-    st.write("""
-    1. You'll be shown a Java code snippet with potential issues
-    2. The system will compile the code and run style checks
-    3. Review the code and write your comments
-    4. Compare your review with an AI-generated review
-    5. Receive feedback on your reviewing skills
-    """)
-    
-    # Only enable the button if a model is initialized
-    if st.session_state.model_initialized:
-        st.button("Start Practice", on_click=generate_new_snippet)
-    else:
-        st.button("Start Practice", disabled=True, help="Please wait for model initialization")
-        st.warning("Please wait for model initialization or pull a model using the sidebar.")
+        render_comparison_step(section_num)
 
 # Move to the next step in the tutorial
 def next_step():
@@ -482,7 +258,7 @@ def generate_new_snippet():
     """Generate a new code snippet and analyze it."""
     # First ensure a model is initialized
     if not st.session_state.model_initialized:
-        st.error("No model is initialized. Please wait for initialization or pull a model.")
+        st.error("No model is initialized. Please initialize a model first.")
         return
     
     with st.spinner("Generating code snippet and analyzing..."):
@@ -521,7 +297,10 @@ def generate_new_snippet():
             st.session_state.ai_review = ai_review
             
             # Clean up temporary file
-            os.unlink(tmp_path)
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
             
             next_step()
         except Exception as e:
@@ -552,10 +331,72 @@ def submit_review():
             import traceback
             st.code(traceback.format_exc(), language="python")
 
+# Render the introduction step
+def render_introduction_step(section_num):
+    """
+    Render the introduction and knowledge about peer code review.
+    
+    Args:
+        section_num (int): Section number for header
+    """
+    st.header(f"{section_num}. Welcome to the Peer Code Review Tutorial")
+    
+    # Load knowledge about peer code review if not already loaded
+    if not st.session_state.knowledge:
+        with st.spinner("Loading code review knowledge..."):
+            if is_ollama_running() and st.session_state.model_initialized:
+                knowledge = get_code_review_knowledge()
+                st.session_state.knowledge = knowledge
+            else:
+                st.session_state.knowledge = """
+                ## Peer Code Review
+                
+                Peer code review is a software quality assurance practice where developers review each other's code
+                to identify bugs, improve code quality, and ensure adherence to standards.
+                
+                ### Key Benefits:
+                - Identifies bugs and issues early
+                - Ensures code quality and consistency
+                - Facilitates knowledge sharing
+                - Improves overall software quality
+                
+                ### Best Practices:
+                1. Be constructive, not critical
+                2. Focus on code, not the coder
+                3. Review code in small chunks
+                4. Provide specific, actionable feedback
+                5. Use a checklist for consistency
+                
+                Please initialize an Ollama model to get more detailed information.
+                """
+    
+    st.markdown(st.session_state.knowledge)
+    
+    st.subheader("How this tutorial works:")
+    st.write("""
+    1. You'll be shown a Java code snippet with potential issues
+    2. The system will compile the code and run style checks
+    3. Review the code and write your comments
+    4. Compare your review with an AI-generated review
+    5. Receive feedback on your reviewing skills
+    """)
+    
+    # Only enable the button if a model is initialized
+    if st.session_state.model_initialized:
+        st.button("Start Practice", on_click=generate_new_snippet)
+    else:
+        st.button("Start Practice", disabled=True, help="Please initialize a model first")
+        st.warning("Please initialize an Ollama model using the section above.")
+
 # Render the code review step
-def render_code_review_step():
-    """Render the code snippet review step."""
-    st.header("Review This Code Snippet")
+def render_code_review_step(section_num):
+    """
+    Render the code snippet review step.
+    
+    Args:
+        section_num (int): Section number for header
+    """
+    st.header(f"{section_num}. Review This Code Snippet")
     
     # Display code snippet
     st.code(st.session_state.code_snippet, language="java")
@@ -573,9 +414,23 @@ def render_code_review_step():
     if not st.session_state.checkstyle_results["issues"]:
         st.success("✅ No style issues found")
     else:
-        st.warning("⚠️ Style issues found:")
-        for issue in st.session_state.checkstyle_results["issues"]:
-            st.write(f"- Line {issue['line']}: {issue['message']}")
+        st.warning(f"⚠️ {len(st.session_state.checkstyle_results['issues'])} style issues found:")
+        
+        # Create a dataframe to display issues nicely
+        import pandas as pd
+        issues_df = pd.DataFrame(st.session_state.checkstyle_results["issues"])
+        
+        # Select and rename columns for display
+        if not issues_df.empty:
+            # Make sure all expected columns exist, add empty ones if needed
+            for col in ["line", "rule", "message", "severity"]:
+                if col not in issues_df.columns:
+                    issues_df[col] = ""
+            
+            display_df = issues_df[["line", "rule", "message", "severity"]]
+            display_df.columns = ["Line", "Rule", "Message", "Severity"]
+            display_df = display_df.sort_values("Line")
+            st.dataframe(display_df)
     
     # AI review (collapsible)
     with st.expander("Show AI Review"):
@@ -598,9 +453,14 @@ def render_code_review_step():
             submit_review()
 
 # Render the comparison step
-def render_comparison_step():
-    """Render the comparison and feedback step."""
-    st.header("Review Comparison")
+def render_comparison_step(section_num):
+    """
+    Render the comparison and feedback step.
+    
+    Args:
+        section_num (int): Section number for header
+    """
+    st.header(f"{section_num}. Review Comparison")
     
     # Display student review and AI review side by side
     col1, col2 = st.columns(2)
