@@ -23,11 +23,12 @@ load_dotenv()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 MODELS_DIR = os.getenv("MODELS_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models"))
 OLLAMA_MODELS_DIR = os.path.join(MODELS_DIR, "ollama")
-DEFAULT_OLLAMA_MODEL = "llama3:8b"
+DEFAULT_OLLAMA_MODEL = "llama3:1b"  # Changed to llama3:1b as per requirement
 
 # Ensure model directories exist
 os.makedirs(MODELS_DIR, exist_ok=True)
 os.makedirs(OLLAMA_MODELS_DIR, exist_ok=True)
+
 
 def is_ollama_running() -> bool:
     """
@@ -41,6 +42,7 @@ def is_ollama_running() -> bool:
         return response.status_code == 200
     except (requests.ConnectionError, requests.Timeout):
         return False
+
 
 def is_docker_ollama_running() -> bool:
     """
@@ -73,6 +75,7 @@ def is_docker_ollama_running() -> bool:
     except (subprocess.SubprocessError, FileNotFoundError):
         return False
 
+
 def start_local_ollama(position: str = "sidebar") -> bool:
     """
     Start Ollama locally based on the platform.
@@ -88,6 +91,10 @@ def start_local_ollama(position: str = "sidebar") -> bool:
         status_placeholder = st.sidebar.empty() if position == "sidebar" else st.empty()
         status_placeholder.info(f"Starting Ollama on {system}...")
         
+        # Import GPU utilities for model initialization (similar to config_manager)
+        from utils.gpu_utils import get_device_string
+        
+        # Start Ollama based on platform
         if system == "Windows":
             # For Windows
             proc = subprocess.Popen(
@@ -132,7 +139,8 @@ def start_local_ollama(position: str = "sidebar") -> bool:
             status_placeholder.info(f"Starting Ollama... ({i+1}/10)")
             time.sleep(1)
             if is_ollama_running():
-                status_placeholder.success("Ollama started successfully!")
+                device_info = get_device_string()
+                status_placeholder.success(f"Ollama started successfully on {device_info}!")
                 return True
                 
         status_placeholder.warning("Ollama did not start within expected time. It might still be starting...")
@@ -144,6 +152,7 @@ def start_local_ollama(position: str = "sidebar") -> bool:
         else:
             st.error(f"Error starting Ollama: {str(e)}")
         return False
+
 
 def start_docker_ollama(position: str = "sidebar") -> bool:
     """
@@ -219,7 +228,10 @@ def start_docker_ollama(position: str = "sidebar") -> bool:
             status_placeholder.info(f"Waiting for Ollama container to be ready... ({i+1}/15)")
             time.sleep(1)
             if is_ollama_running():
-                status_placeholder.success("Ollama container started successfully!")
+                # Import GPU utilities for consistency with config_manager
+                from utils.gpu_utils import get_device_string
+                device_info = get_device_string()
+                status_placeholder.success(f"Ollama container started successfully on {device_info}!")
                 return True
                 
         status_placeholder.warning("Ollama container might not be ready yet. Please try again in a moment.")
@@ -231,6 +243,7 @@ def start_docker_ollama(position: str = "sidebar") -> bool:
         else:
             st.error(f"Error starting Ollama container: {str(e)}")
         return False
+
 
 def ensure_ollama_running(position: str = "sidebar") -> bool:
     """
@@ -259,14 +272,23 @@ def ensure_ollama_running(position: str = "sidebar") -> bool:
     col1, col2 = notification_func.columns(2)
     
     with col1:
-        if st.button("Start Local Ollama"):
+        if notification_func.button("Start Local Ollama", key=f"start_local_{position}"):
             return start_local_ollama(position)
             
     with col2:
-        if st.button("Start Docker Ollama"):
+        if notification_func.button("Start Docker Ollama", key=f"start_docker_{position}"):
             return start_docker_ollama(position)
+    
+    # Add manual instructions
+    notification_func.markdown("""
+    #### Manual Start Instructions:
+    1. Open a terminal/command prompt
+    2. Run `ollama serve`
+    3. Keep the terminal open and refresh this page
+    """)
             
     return False
+
 
 def get_ollama_models() -> List[Dict[str, Any]]:
     """
@@ -277,10 +299,10 @@ def get_ollama_models() -> List[Dict[str, Any]]:
     """
     # Default library of models that can be pulled
     library_models = [
+        {"id": "llama3:1b", "name": "Llama 3 (1B)", "description": "Meta's Llama 3 1B model", "pulled": False, "tags": ["chat", "fast"]},
         {"id": "llama3", "name": "Llama 3", "description": "Meta's Llama 3 model", "pulled": False, "tags": ["chat", "general"]},
         {"id": "llama3:8b", "name": "Llama 3 (8B)", "description": "Meta's Llama 3 8B model", "pulled": False, "tags": ["chat", "general"]},
         {"id": "llama3:70b", "name": "Llama 3 (70B)", "description": "Meta's Llama 3 70B model", "pulled": False, "tags": ["chat", "general"]},
-        {"id": "llama3:1b", "name": "Llama 3 (1B)", "description": "Meta's Llama 3 1B model", "pulled": False, "tags": ["chat", "fast"]},
         {"id": "deepseek-coder", "name": "DeepSeek Coder", "description": "Code-specialized LLM", "pulled": False, "tags": ["code", "technical"]},
         {"id": "deepseek-coder:6.7b", "name": "DeepSeek Coder (6.7B)", "description": "More reasonable sized code model", "pulled": False, "tags": ["code", "technical"]},
         {"id": "deepseek-llm", "name": "DeepSeek LLM", "description": "General purpose LLM", "pulled": False, "tags": ["chat", "general"]},
@@ -323,8 +345,14 @@ def get_ollama_models() -> List[Dict[str, Any]]:
                 if not any(model["id"] == model_id for model in library_models):
                     # Extract size information
                     size_str = pulled_model.get("size", "Unknown")
-                    # Try to determine appropriate tags
+                    # Try to determine appropriate tags based on model name
                     tags = []
+                    if "code" in model_id.lower():
+                        tags.append("code")
+                    if any(name in model_id.lower() for name in ["mini", "small", "tiny", "1b", "2b"]):
+                        tags.append("fast")
+                    else:
+                        tags.append("general")
                     
                     # Add to the list
                     library_models.append({
@@ -343,9 +371,11 @@ def get_ollama_models() -> List[Dict[str, Any]]:
         # Return unsorted library models if we can't connect
         return library_models
 
+
 def pull_ollama_model(model_name: str, position: str = "content") -> bool:
     """
     Pull an Ollama model with progress tracking.
+    Similar approach to ConfigManager._render_ollama_setup method.
     
     Args:
         model_name (str): Name of the model to pull
@@ -373,13 +403,14 @@ def pull_ollama_model(model_name: str, position: str = "content") -> bool:
             progress_placeholder.error(f"Failed to start model download: {response.text}")
             return False
         
-        # Monitor progress
+        # Monitor progress with a progress bar - similar to config_manager approach
         start_time = time.time()
         last_update_time = start_time
         progress_bar = notification_func.progress(0.0)
         
         pull_completed = False
-        while not pull_completed and (time.time() - start_time) < 1800:  # 30 minute timeout
+        max_wait_time = 1800  # 30 minute timeout
+        while not pull_completed and (time.time() - start_time) < max_wait_time:
             try:
                 # Check if model exists in list of models
                 check_response = requests.get(f"{OLLAMA_BASE_URL}/api/tags")
@@ -387,7 +418,10 @@ def pull_ollama_model(model_name: str, position: str = "content") -> bool:
                     models = check_response.json().get("models", [])
                     if any(model["name"] == model_name for model in models):
                         progress_bar.progress(1.0)
-                        progress_placeholder.success(f"Model {model_name} downloaded successfully!")
+                        # Import GPU utilities for consistency with config_manager
+                        from utils.gpu_utils import get_device_string
+                        device_info = get_device_string()
+                        progress_placeholder.success(f"Model {model_name} downloaded successfully on {device_info}!")
                         pull_completed = True
                         break
                 
@@ -417,6 +451,7 @@ def pull_ollama_model(model_name: str, position: str = "content") -> bool:
         notification_func = st.sidebar if position == "sidebar" else st
         notification_func.error(f"Error pulling model: {str(e)}")
         return False
+
 
 def get_ollama_model_info(model_name: str) -> Optional[Dict[str, Any]]:
     """
@@ -474,9 +509,11 @@ def get_ollama_model_info(model_name: str) -> Optional[Dict[str, Any]]:
         print(f"Error getting model info: {str(e)}")
         return None
 
+
 def initialize_ollama_model(model_name: str, temperature: float = 0.7, max_tokens: int = 512) -> Optional[Any]:
     """
     Initialize an Ollama model for use with LangChain.
+    Similar approach to ConfigManager._render_ollama_setup().
     
     Args:
         model_name (str): Name of the model
@@ -499,14 +536,21 @@ def initialize_ollama_model(model_name: str, temperature: float = 0.7, max_token
         if not model_info:
             st.warning(f"Model {model_name} not found. You may need to pull it first.")
             return None
+        
+        # Import GPU utilities for model initialization (similar to config_manager)
+        from utils.gpu_utils import get_device_string
+        device_info = get_device_string()
             
-        # Initialize the model
+        # Initialize the model with optimized parameters
         ollama_model = Ollama(
             model=model_name,
             base_url=OLLAMA_BASE_URL,
             temperature=temperature,
             num_predict=max_tokens
         )
+        
+        # Log success message
+        st.success(f"Successfully initialized {model_name} on {device_info}!")
         
         return ollama_model
         

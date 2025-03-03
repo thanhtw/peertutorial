@@ -1,11 +1,32 @@
+"""
+AI agent module for handling code review and analysis tasks.
+This module interacts with Ollama to generate code reviews and feedback.
+"""
+
 import json
 import requests
 import os
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
 # Ollama API configuration
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "codellama")
+# Updated default model to llama3:1b as per requirement
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3:1b")
+
+
+def is_ollama_running() -> bool:
+    """
+    Check if Ollama is running at the configured URL.
+    
+    Returns:
+        bool: True if Ollama is running, False otherwise
+    """
+    try:
+        response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=2)
+        return response.status_code == 200
+    except (requests.ConnectionError, requests.Timeout):
+        return False
+
 
 def call_ollama(prompt: str, system_prompt: Optional[str] = None) -> str:
     """
@@ -18,6 +39,35 @@ def call_ollama(prompt: str, system_prompt: Optional[str] = None) -> str:
     Returns:
         The model's response as a string
     """
+    # First check if Ollama is running
+    if not is_ollama_running():
+        error_msg = (
+            "Ollama is not running or not accessible. Please:\n"
+            "1. Ensure Ollama is installed\n"
+            "2. Start Ollama using 'ollama serve' in a terminal\n"
+            "3. Verify the connection URL is correct (currently: {OLLAMA_URL})\n"
+            "4. Refresh this page and try again"
+        )
+        print(error_msg)
+        return error_msg
+    
+    # Check if the model exists
+    try:
+        model_check = requests.get(f"{OLLAMA_URL}/api/tags")
+        if model_check.status_code == 200:
+            models = model_check.json().get("models", [])
+            model_exists = any(model["name"] == OLLAMA_MODEL for model in models)
+            if not model_exists:
+                pull_msg = (
+                    f"Model '{OLLAMA_MODEL}' is not available. You need to pull it first.\n"
+                    f"Run 'ollama pull {OLLAMA_MODEL}' in a terminal, then refresh this page."
+                )
+                print(pull_msg)
+                return pull_msg
+    except Exception as e:
+        print(f"Error checking available models: {e}")
+    
+    # Call the Ollama API
     headers = {"Content-Type": "application/json"}
     data = {
         "model": OLLAMA_MODEL,
@@ -34,7 +84,15 @@ def call_ollama(prompt: str, system_prompt: Optional[str] = None) -> str:
         return response.json().get("response", "")
     except requests.exceptions.RequestException as e:
         print(f"Error calling Ollama API: {e}")
-        return "Error communicating with the AI model. Please check if Ollama is running."
+        return (
+            "Error communicating with the Ollama API.\n\n"
+            f"Details: {str(e)}\n\n"
+            "Please check if:\n"
+            f"1. Ollama is running correctly\n"
+            f"2. The model '{OLLAMA_MODEL}' is properly installed\n"
+            f"3. The URL '{OLLAMA_URL}' is correct"
+        )
+
 
 def get_code_review_knowledge() -> str:
     """
@@ -53,6 +111,7 @@ def get_code_review_knowledge() -> str:
     prompt = "Provide a comprehensive guide on how to conduct effective peer code reviews for students learning programming."
     
     return call_ollama(prompt, system_prompt)
+
 
 def generate_code_snippet() -> str:
     """
@@ -76,6 +135,7 @@ def generate_code_snippet() -> str:
     prompt = "Generate a Java code snippet with intentional issues for a peer code review exercise. The code should be a complete class, between 30-50 lines long."
     
     return call_ollama(prompt, system_prompt)
+
 
 def get_ai_review(
     code_snippet: str, 
@@ -101,6 +161,9 @@ def get_ai_review(
     """
     
     # Create a prompt that includes the code and analysis results
+    compilation_status = "Successful" if compile_results["success"] else f"Failed with errors: {compile_results['errors']}"
+    checkstyle_issues = json.dumps(checkstyle_results["issues"], indent=2) if checkstyle_results["issues"] else "No style issues found."
+    
     prompt = f"""
     Please review the following Java code snippet:
     
@@ -109,10 +172,10 @@ def get_ai_review(
     ```
     
     Compilation results:
-    {"Successful" if compile_results["success"] else f"Failed with errors: {compile_results['errors']}"}
+    {compilation_status}
     
     Checkstyle results:
-    {json.dumps(checkstyle_results["issues"], indent=2) if checkstyle_results["issues"] else "No style issues found."}
+    {checkstyle_issues}
     
     Provide a comprehensive code review that addresses:
     1. Code correctness and potential bugs
@@ -123,6 +186,7 @@ def get_ai_review(
     """
     
     return call_ollama(prompt, system_prompt)
+
 
 def compare_reviews(ai_review: str, student_review: str) -> Dict[str, Any]:
     """
