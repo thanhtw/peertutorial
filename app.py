@@ -1,29 +1,15 @@
 """
-Main application module for Peer Code Review Tutorial System.
-Implements an AI-Agent architecture for more intelligent and adaptive tutorials.
+Simplified Application for Peer Code Review Tutorial System
+Using the unified AI agent architecture instead of multiple agents
 """
 
 import streamlit as st
-import subprocess
-import os
-import sys
 import time
-from pathlib import Path
-from dotenv import load_dotenv
 import json
 import pandas as pd
-import tempfile
-
-# Import agents
-from agents.orchestrator_agent import OrchestratorAgent
-
-# Import utilities
-from modules.compiler import ensure_java_installed, get_java_version
-from modules.checkstyle import check_checkstyle_available
-from modules.ai_agent import is_ollama_running, start_ollama, get_available_models, pull_model, OLLAMA_URL, OLLAMA_MODEL
-
-# Load environment variables
-load_dotenv()
+import os
+from pathlib import Path
+from unified_peer_review_agent import UnifiedPeerReviewAgent
 
 # Set page configuration
 st.set_page_config(
@@ -32,167 +18,92 @@ st.set_page_config(
     layout="wide"
 )
 
-# Ensure required directories exist
-def ensure_directories():
-    """
-    Ensure required directories exist.
-    """
-    # Create models directory
-    models_dir = os.getenv("MODELS_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "models"))
-    os.makedirs(models_dir, exist_ok=True)
-    
-    # Create data directory
-    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-    os.makedirs(data_dir, exist_ok=True)
-    
-    # Create agents directory
-    agents_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents")
-    os.makedirs(agents_dir, exist_ok=True)
-    
-    # Create .env file if it doesn't exist
-    env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-    if not os.path.exists(env_file):
-        with open(env_file, "w") as f:
-            f.write("# Models directory\n")
-            f.write(f"MODELS_DIR={models_dir}\n")
-            f.write("\n# Ollama Settings\n")
-            f.write("OLLAMA_URL=http://localhost:11434\n")
-            f.write(f"OLLAMA_MODEL={OLLAMA_MODEL}\n")
-
 # Initialize session state variables
 def initialize_session_state():
-    """Initialize all session state variables with default values."""
+    """Initialize all session state variables with default values.111"""
     if "step" not in st.session_state:
         st.session_state.step = 1
-    if "orchestrator" not in st.session_state:
-        st.session_state.orchestrator = None
+    if "agent" not in st.session_state:
+        st.session_state.agent = None
     if "current_exercise" not in st.session_state:
         st.session_state.current_exercise = None
     if "review_result" not in st.session_state:
         st.session_state.review_result = None
     if "student_review" not in st.session_state:
         st.session_state.student_review = ""
-    # Add model selection state
     if "selected_model" not in st.session_state:
-        st.session_state.selected_model = OLLAMA_MODEL
-    # Add model initialization state 
+        st.session_state.selected_model = "llama3:1b"
     if "model_initialized" not in st.session_state:
         st.session_state.model_initialized = False
     if "system_ready" not in st.session_state:
         st.session_state.system_ready = False
-    # Add model parameters 
     if "model_params" not in st.session_state:
         st.session_state.model_params = {
             "temperature": 0.7,
             "max_tokens": 1024
         }
-    # Add learning history
-    if "learning_history" not in st.session_state:
-        st.session_state.learning_history = None
 
-# Verify system requirements
-def check_system_requirements():
-    """
-    Check if system meets requirements to run the application.
+# Ensure directories and files exist
+def ensure_directories():
+    """Ensure required directories exist."""
+    # Create data directory
+    data_dir = Path(__file__).parent / "data"
+    data_dir.mkdir(exist_ok=True)
     
-    Returns:
-        tuple: (ready, details) where ready is a boolean and details is a dict
-    """
-    details = {
-        "java_installed": False,
-        "java_version": None,
-        "ollama_running": False,
-        "checkstyle_available": False,
-        "messages": []
-    }
-    
-    # Check Java installation
-    java_installed = ensure_java_installed()
-    details["java_installed"] = java_installed
-    details["java_version"] = get_java_version()
-    
-    if not java_installed:
-        details["messages"].append("Java is not installed. Please install Java to compile and analyze Java code.")
-    
-    # Check Ollama
-    ollama_running = is_ollama_running()
-    details["ollama_running"] = ollama_running
-    
-    if not ollama_running:
-        details["messages"].append(f"Ollama is not running at {OLLAMA_URL}. The application will attempt to start it.")
-    
-    # Check Checkstyle
-    checkstyle_available, checkstyle_message = check_checkstyle_available()
-    details["checkstyle_available"] = checkstyle_available
-    
-    if not checkstyle_available:
-        details["messages"].append(f"Checkstyle is not available: {checkstyle_message}")
-    
-    # System is ready if Java is installed
-    # (We can still function without Ollama running as we'll try to start it)
-    # (We will download Checkstyle if it's missing)
-    ready = java_installed
-    
-    return ready, details
+    # Create .env file if it doesn't exist
+    env_file = Path(__file__).parent / ".env"
+    if not env_file.exists():
+        with open(env_file, "w") as f:
+            f.write("# Ollama Settings\n")
+            f.write("OLLAMA_URL=http://localhost:11434\n")
+            f.write("OLLAMA_MODEL=llama3:1b\n")
 
-# Display system status
+# Display system status in the sidebar
 def display_system_status():
-    """Display system status in the sidebar."""
-    # Check requirements
-    ready, details = check_system_requirements()
-    
+    """Display system status in the sidebar and initialize the agent if needed."""
     st.sidebar.header("System Status")
     
-    # Java status
-    if details["java_installed"]:
-        st.sidebar.success(f"✅ Java is installed: {details['java_version']}")
+    # Check if Java is installed
+    from modules.compiler import ensure_java_installed, get_java_version
+    java_installed = ensure_java_installed()
+    java_version = get_java_version()
+    
+    if java_installed:
+        st.sidebar.success(f"✅ Java is installed: {java_version}")
     else:
         st.sidebar.error("❌ Java is not installed")
         st.sidebar.info("Please install Java Development Kit (JDK) to use this application.")
+        return False
     
-    # Ollama status
-    if details["ollama_running"]:
-        st.sidebar.success(f"✅ Ollama is running at {OLLAMA_URL}")
+    # Initialize agent if not already done
+    if st.session_state.agent is None:
+        st.session_state.agent = UnifiedPeerReviewAgent()
+    
+    # Check if Ollama is running
+    if st.session_state.agent.is_ollama_running():
+        st.sidebar.success(f"✅ Ollama is running at {st.session_state.agent.ollama_url}")
     else:
-        st.sidebar.warning(f"⚠️ Ollama is not running at {OLLAMA_URL}")
+        st.sidebar.warning(f"⚠️ Ollama is not running")
         if st.sidebar.button("Start Ollama"):
             status_placeholder = st.sidebar.empty()
             status_placeholder.info("Starting Ollama...")
-            if start_ollama():
+            if st.session_state.agent.start_ollama():
                 status_placeholder.success("✅ Ollama started successfully!")
-                details["ollama_running"] = True
                 st.rerun()
             else:
                 status_placeholder.error("❌ Failed to start Ollama")
                 st.sidebar.info("Please start Ollama manually with 'ollama serve'")
+                return False
     
-    # Checkstyle status
-    if details["checkstyle_available"]:
+    # Check if Checkstyle is available
+    from modules.checkstyle import check_checkstyle_available
+    checkstyle_available, checkstyle_message = check_checkstyle_available()
+    if checkstyle_available:
         st.sidebar.success("✅ Checkstyle is available")
     else:
         st.sidebar.warning("⚠️ Checkstyle will be downloaded when needed")
     
-    # Overall status
-    if ready:
-        st.session_state.system_ready = True
-        return True
-    else:
-        st.session_state.system_ready = False
-        st.warning("⚠️ System is not fully ready. Please address the issues above.")
-        return False
-
-# Initialize the Orchestrator agent
-def initialize_orchestrator():
-    """
-    Initialize the Orchestrator agent if not already initialized.
-    
-    Returns:
-        The Orchestrator agent instance
-    """
-    if st.session_state.orchestrator is None:
-        st.session_state.orchestrator = OrchestratorAgent()
-    
-    return st.session_state.orchestrator
+    return java_installed
 
 # Render LLM setup section
 def render_llm_setup_section(section_num: int):
@@ -204,7 +115,9 @@ def render_llm_setup_section(section_num: int):
     """
     st.header(f"{section_num}. Setup AI Model")
     
-    if not is_ollama_running():
+    agent = st.session_state.agent
+    
+    if not agent.is_ollama_running():
         st.error("Ollama server is not running. Please start it from the sidebar.")
         return
     
@@ -212,11 +125,9 @@ def render_llm_setup_section(section_num: int):
     st.write("### Available Ollama Models")
     st.write("Select a model from the dropdown. Models with ✅ are already pulled and ready to use.")
 
-    # Get orchestrator instance to help with model initialization
-    orchestrator = initialize_orchestrator()
-    
-    # Get available models from the AI agent module
-    available_models = get_available_models()
+    # Get available models
+    from utils.ollama_utils import get_ollama_models
+    available_models = get_ollama_models()
     
     if not available_models:
         st.warning("Could not retrieve models from Ollama server. Please check your connection.")
@@ -253,7 +164,8 @@ def render_llm_setup_section(section_num: int):
                 with col1:
                     if st.button(f"Pull {selected_model['name']} Model"):
                         with st.spinner(f"Pulling {selected_model['name']}..."):
-                            if pull_model(model_id):
+                            from utils.ollama_utils import pull_ollama_model
+                            if pull_ollama_model(model_id):
                                 st.success(f"Successfully pulled {selected_model['name']}")
                                 st.rerun()
                             else:
@@ -293,8 +205,8 @@ def render_llm_setup_section(section_num: int):
                         st.warning("Please pull the model first before initializing.")
                     else:
                         with st.spinner(f"Initializing {selected_model['name']}..."):
-                            # Initialize the model in the orchestrator
-                            if orchestrator.initialize_model(
+                            # Initialize the model in the agent
+                            if agent.initialize_model(
                                 model_id, 
                                 temperature=temperature, 
                                 max_tokens=max_tokens
@@ -330,12 +242,12 @@ def generate_new_exercise(difficulty: str = "medium", focus_areas: list = None):
         st.error("No model is initialized. Please initialize a model first.")
         return False
     
-    orchestrator = initialize_orchestrator()
+    agent = st.session_state.agent
     
     with st.spinner("Generating code snippet and analyzing..."):
         try:
-            # Generate exercise using the orchestrator
-            exercise_data = orchestrator.generate_exercise(difficulty, focus_areas)
+            # Generate exercise using the agent
+            exercise_data = agent.generate_exercise(difficulty, focus_areas)
             
             if not exercise_data["success"]:
                 st.error(exercise_data.get("error", "Failed to generate exercise"))
@@ -366,12 +278,12 @@ def submit_review():
         st.warning("Please enter your review before submitting.")
         return False
     
-    orchestrator = initialize_orchestrator()
+    agent = st.session_state.agent
     
     with st.spinner("Analyzing your review..."):
         try:
             # Analyze student review
-            result = orchestrator.analyze_student_review(
+            result = agent.analyze_student_review(
                 st.session_state.current_exercise,
                 st.session_state.student_review
             )
@@ -382,9 +294,6 @@ def submit_review():
             
             # Store the analysis result
             st.session_state.review_result = result
-            
-            # Update learning history
-            st.session_state.learning_history = orchestrator.progress_tracker.get_learning_history()
             
             # Move to next step
             st.session_state.step = 3
@@ -419,44 +328,6 @@ def render_introduction_step(section_num: int):
     Each exercise is designed to challenge your ability to identify different types of issues,
     from compilation errors to style violations and logical bugs.
     """)
-    
-    # Add information about code reviews if the model is initialized
-    if st.session_state.model_initialized:
-        with st.spinner("Loading code review knowledge..."):
-            # In a full implementation, we would get this from the orchestrator
-            # For now, we'll use a placeholder
-            st.markdown("""
-            ## Effective Code Reviews
-            
-            Code reviews are a crucial practice in software development that help improve code quality,
-            catch bugs early, and share knowledge within teams. Here are key principles:
-            
-            ### Benefits of Code Reviews
-            
-            - **Error Detection**: Find bugs, logic errors, and edge cases early
-            - **Knowledge Sharing**: Spread understanding of the codebase
-            - **Consistent Standards**: Ensure coding standards are maintained
-            - **Improved Design**: Identify and fix architectural issues
-            
-            ### Best Practices
-            
-            1. **Be Constructive**: Focus on improving the code, not criticizing the coder
-            2. **Be Specific**: Provide clear examples and explanations
-            3. **Be Thorough**: Check for different types of issues (logic, style, performance)
-            4. **Prioritize Issues**: Focus on important problems first
-            
-            ### Common Issues to Look For
-            
-            - **Compilation Errors**: Syntax errors, undefined variables, type mismatches
-            - **Style Issues**: Naming conventions, formatting, comments
-            - **Logical Errors**: Incorrect algorithms, off-by-one errors, edge cases
-            - **Performance Issues**: Inefficient algorithms, unnecessary operations
-            - **Security Vulnerabilities**: Injection risks, improper input validation
-            
-            Developing these skills takes practice, and this tutorial will help you build them systematically.
-            """)
-    else:
-        st.info("Initialize a model to see information about effective code reviews.")
     
     # Difficulty selection
     st.subheader("Choose Your Exercise")
@@ -647,8 +518,8 @@ def render_feedback_step(section_num: int):
     
     # Display next exercise recommendation
     st.subheader("Next Steps")
-    orchestrator = initialize_orchestrator()
-    recommendation = orchestrator.recommend_next_exercise()
+    agent = st.session_state.agent
+    recommendation = agent.recommend_next_exercise()
     
     st.markdown(f"**Recommendation:** {recommendation['rationale']}")
     
@@ -684,8 +555,8 @@ def render_learning_progress(section_num: int):
     """
     st.header(f"{section_num}. Your Learning Progress")
     
-    orchestrator = initialize_orchestrator()
-    learning_summary = orchestrator.get_learning_summary()
+    agent = st.session_state.agent
+    learning_summary = agent.generate_learning_summary()
     
     # Display overview stats
     st.subheader("Learning Overview")
