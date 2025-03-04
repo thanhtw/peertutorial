@@ -25,6 +25,16 @@ MODELS_DIR = os.getenv("MODELS_DIR", os.path.join(os.path.dirname(os.path.abspat
 OLLAMA_MODELS_DIR = os.path.join(MODELS_DIR, "ollama")
 DEFAULT_OLLAMA_MODEL = "llama3:1b"  # Changed to llama3:1b as per requirement
 
+OLLAMA_MODELS = {
+    "Llama 3": "llama3",
+    "Llama 3 (8B)": "llama3:8b",
+    "Llama 3 (1B)": "llama3:1b",
+    "DeepSeek Coder": "deepseek-coder",
+    "DeepSeek LLM": "deepseek-llm",
+    "Phi-3 Mini": "phi3:mini",
+    "Gemma 2B": "gemma:2b"
+}
+
 # Ensure model directories exist
 os.makedirs(MODELS_DIR, exist_ok=True)
 os.makedirs(OLLAMA_MODELS_DIR, exist_ok=True)
